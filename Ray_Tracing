@@ -1,0 +1,490 @@
+# RT code for horn antenna w/ GRIN hyperbolic lens
+# feeds to eaton lens 90 degrees
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+
+# horn Geometry
+lam = 5 # operating freq 60GHz
+aperture_size = 34
+phi_degrees = 30 # horn phi
+
+# for visualization
+num_rays = 8 # number of rays
+ray_space = 0.85 * lam; #spacing of rays
+
+phi_radians = math.radians(phi_degrees)
+#horn edges are lines at angles + and - phi
+#aperture half-width is size/2
+R = aperture_size/(2*math.sin(phi_radians))
+rphi = R * math.sin(phi_radians)
+horn_rays = np.sqrt(rphi*2 + (num_rays * ray_space)*2);
+
+# need snells law here
+def unit_vector(v): #make direction vectors unit length 
+    v = np.asarray(v, dtype=float) #make v numpy array
+    mag = np.linalg.norm(v) #magnitude of v
+    return v if mag == 0 else v / mag
+
+def snell_refract(dir_in, normal, n_from, n_to): #inputs 
+    #o/p unit direction from refracted ray
+    
+    #normalize input first, make sure they are unit vectors
+    dir_in = unit_vector(dir_in) #incident ray direction
+    normal = unit_vector(normal) #interface normal direction (points from medium n_from into n_to)
+    
+    #cos thetha_i = -n.d n(surface nornal from med 1 to 2), d(incident ray direction)
+    #unit vectors => a.b = cos(thetha) 
+    cos_inc = -float(np.dot(normal, dir_in))
+    if cos_inc < 0: #normal is pointing the wrong way relative to the ray,
+        normal = -normal #flip the normal
+        cos_inc = -float(np.dot(normal, dir_in))
+            
+    n_ratio = n_from / n_to #Snell's ratio 
+    #n_f sin_i = n_t sin_t
+    #sin_t = n_ratio.sin_i 
+    #cos^2_t = 1 - sin^2_t
+    cos_t = 1.0 - n_ratio**2 * (1.0 - cos_inc**2)
+    if cos_t < 0:
+        return None  # TIR
+    #Refraction : t = n_ratio.i+(n_ratio cos_i - cos_t).n
+    dir_out = n_ratio * dir_in + (n_ratio * cos_inc - math.sqrt(cos_t)) * normal
+    return unit_vector(dir_out)
+
+#launch rays from horn phase centre
+thetas = np.linspace(-phi_radians, +phi_radians, num_rays) #ray angles from -phi to phi
+ray_origin = np.array([0.0, -R], dtype=float) #place the horn phase centreat x=0, z=-R 
+#Each ray direction , cos 
+#column_stack - take a seq od 1D arays and stack them as columns to make single 2D array.
+ray_dirs = np.column_stack((np.sin(thetas), np.cos(thetas))) 
+
+
+# hyperbolic lens profile
+grid_res = 400
+lens_rad = rphi  # match horn aperture radius
+
+#hyper_prof = (n-1)*f/(n*math.cos(theta)-1)
+# rho(theta) = (n-1) f / (n cos(theta) - 1)
+n1 = 1 #air index
+n_lens = 2.2 #hyperbolic lens 
+f = R #focal distance of h_lens = horn phase centre distance (focus at horn phase centre)
+lens_gap = 8 #gap b/w lens and horn
+
+def rho_of_theta(theta): #hyperbolic_profile eq
+    return (n_lens-1)*f/(n_lens*math.cos(theta)-1)
+
+def surf_point(theta): #surface_normal
+    rr = rho_of_theta(theta) #radius(distance from focus to surface)
+    x = rr * math.sin(theta) #convert polar to x 
+    #convert polar to z
+    #subtract f so vertex is near z=0, add lens_gap to move the lens up
+    z= rr * math.cos(theta) - f + lens_gap
+    return np.array([x, z], dtype=float) #return x and z (surface point)
+
+def surf_normal(theta):
+    #taken from https://www.pbr-book.org/3ed-2018/
+    A = (n_lens-1)*f
+    D = (n_lens * math.cos(theta) - 1.0) 
+    #rho = A/D
+    #drho/dthetha = -A D'/D^2
+    drho = A * (n_lens * math.sin(theta)) / (D**2)
+    rr = A / D #rho(thetha)
+    #x = rho sin(thetha), z = rho cos(thetha)
+    dx = drho * math.sin(theta) + rr * math.cos(theta) #rho'sin(thetha)+rhocos(thetha)
+    dz = drho * math.cos(theta) - rr * math.sin(theta) #rho'cos(thetha)-rhosin(thetha)
+
+    tangent = np.array([dx, dz], dtype=float)
+    n_hat = unit_vector(np.array([-tangent[1], tangent[0]], dtype=float)) # rotate tangent by 90 deg
+    #normal to point into the lens
+    if n_hat[1] < 0: 
+        n_hat = -n_hat
+    return n_hat
+
+lens_rad_base = max(lens_rad, abs(float(surf_point(phi_radians)[0])))
+hyper_scale = 1.35
+lens_rad = hyper_scale * lens_rad_base
+
+theta_limit = math.acos(1.0 / n_lens) - 1e-6
+th_scan = np.linspace(0.0, theta_limit, 25000)
+x_scan = np.array([abs(float(surf_point(th)[0])) for th in th_scan], dtype=float)
+
+hit = np.where(x_scan >= lens_rad)[0]
+if hit.size > 0:
+    theta_prof_max = float(th_scan[hit[0]])
+else:
+    lens_rad = float(np.max(x_scan))
+    theta_prof_max = float(theta_limit)
+
+rho = np.linspace(0, lens_rad, grid_res)
+rad = np.linspace(0.0, lens_rad, grid_res)
+
+# Build a z(r) profile 
+theta_prof = np.linspace(0.0, theta_prof_max, 8000)
+x_prof = []
+z_prof = []
+for th in theta_prof:
+    p = surf_point(th)
+    if abs(p[0]) <= lens_rad:
+        x_prof.append(abs(p[0]))
+        z_prof.append(p[1])
+x_prof = np.array(x_prof)
+z_prof = np.array(z_prof)
+idx = np.argsort(x_prof)
+x_prof = x_prof[idx]
+z_prof = z_prof[idx]
+
+z_rad_hyper = np.interp(rad, x_prof, z_prof, left=0.0, right=z_prof[-1])
+
+#need snells law here
+#visualization
+#z_prof (hyperbolic lens vs radius)
+z_front_max = float(np.max(z_prof)) #highest z on the curved front surface
+thickness = 2.0 #lens thickness
+z_back = z_front_max + thickness #back of the lens
+n_hat_back = np.array([0.0, 1.0], dtype=float)  # normal from lens -> air
+
+screen_dist = 10.0 #to see where rays go after exiting the lens (add a distance)
+z_screen = z_back + screen_dist
+
+#GRIN lens
+def n_r(r, n0, n_edge, p):
+    #r : radial position, n0 : index at centre (r=0), n_edge: index at edge
+    #convert radius to nromalized radius (to 1)
+    rr = abs(float(r)) / max(lens_rad, 1e-12) #add eps
+    rr = float(np.clip(rr, 0.0, 1.0)) #outside lens not considered
+    return float(n_edge + (n0 - n_edge) * (1.0 - rr**p)) #at rr=0, n=n0 and rr=1, n=n_edge
+
+def output_angles(n0, n_edge, p, thickness):
+    z_back_local = z_front_max + thickness
+    exit_angles = [] #output angle for each ray that passes through 
+    for th, u0 in zip(thetas, ray_dirs): #thethas : angles from horn phase centre, th : where each ray hits the surface
+        p1 = surf_point(th) #ASSUME THAT RAY WITH ANGLE THETHA HITS SURFACE 
+        if abs(p1[0]) > lens_rad:
+            continue #remove rays that dont touch the lens
+
+        n_hat1 = surf_normal(th) #surface normal
+
+        # Snell 1: air -> lens at hyperbolic surface
+        n_in = n_r(p1[0], n0, n_edge, p) 
+        u1 = snell_refract(u0, n_hat1, 1.0, n_in) #vector snell's law
+        if u1 is None or u1[1] <= 0: #TIR
+            continue
+
+        # propagate inside lens to back face 
+        t2 = (z_back_local - p1[1]) / u1[1] #ray should touch the other surface
+        # p(t) = p1+t*u1
+        if t2 <= 0:
+            continue
+        p2 = p1 + t2 * u1
+
+        # Snell #2: lens -> air at back plane
+        #local index at the exit location (depending on the radius)
+        n_out_loc = n_r(p2[0], n0, n_edge, p)
+        u2 = snell_refract(u1, n_hat_back, n_out_loc, 1.0)
+        if u2 is None or u2[1] <= 0:
+            continue
+
+        exit_angles.append(math.degrees(math.atan2(u2[0], u2[1])))
+
+    exit_angles = np.array(exit_angles, dtype=float)
+    if exit_angles.size < 3:
+        return None, None
+    return float(np.mean(exit_angles)), float(np.std(exit_angles))
+
+
+best = None
+best_params = None
+n0_list = np.linspace(2.2, 6, 14) #n from 2.2 to 6 (12 values)
+nedge_list = np.linspace(1.01, 1.6, 12) #close to 1 (thats why we chose 1.01) 
+p_list = np.linspace(1.0, 10.0, 19)   
+#thick_list = np.linspace(0.5, 0.6*lens_rad, 25
+thick_list = np.linspace(1.5, 10.0, 35) #lens thickness    
+#z_back_local = z_front_max + thickness
+
+#for collimating lens = mu =0 (beam points straight), sig =0 (all rays exit parallel)
+for n0 in n0_list:
+    for ne in nedge_list:
+        if ne >= n0:
+            continue
+        for pwr in p_list:
+            for t in thick_list:
+                mu, sig = output_angles(n0, ne, pwr, t)
+                if mu is None:
+                    continue
+                score = sig + 0.25*abs(mu)
+                if best is None or score < best:
+                    best = score
+                    best_params = (float(n0), float(ne), float(pwr), float(t), float(mu), float(sig))
+
+n0_best, nedge_best, p_best, thick_best, mu_best, sig_best = best_params
+thickness = thick_best 
+z_back = z_front_max + thickness
+z_screen = z_back + screen_dist
+
+print("n0 =", n0_best, "n_edge =", nedge_best, "p =", p_best, "thickness =", thick_best)
+
+#Eaton lens 
+eaton_radius = 2.5 * lens_rad
+eaton_gap = 6.0
+#eaton_center = np.array([0.35 * eaton_radius, z_back + eaton_gap + eaton_radius], dtype=float)
+#eaton_center = np.array([0.4 * eaton_radius, z_back + eaton_gap + eaton_radius])
+eaton_center = np.array([0.65*eaton_radius, z_back + eaton_gap + eaton_radius], dtype=float)
+
+rn_min = 1e-5
+rn_grid_e = np.linspace(rn_min, 1.0, 12000)
+#rn_min = 1e-3
+#rn_grid_e = np.linspace(rn_min, 1.0, 6000)
+n_grid_e = np.zeros_like(rn_grid_e)
+
+def eaton_n90_root(rn):
+    rn = float(np.clip(rn, rn_min, 1.0))
+    if rn >= 1.0:
+        return 1.0
+
+    def f_n(n):
+        return n**4 - (2.0/rn)*n + 1.0
+
+    lo = 1.0
+    hi = max(2.0, 3.0 * (2.0/rn)**(1.0/3.0))
+    while f_n(hi) <= 0.0:
+        hi *= 2.0
+
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if f_n(mid) > 0.0:
+            hi = mid
+        else:
+            lo = mid
+    return 0.5 * (lo + hi)
+
+for i, rn in enumerate(rn_grid_e):
+    n_grid_e[i] = eaton_n90_root(rn)
+
+dn_drn_e = np.gradient(n_grid_e, rn_grid_e)
+
+def eaton_n(rn):
+    rn = float(np.clip(rn, rn_min, 1.0))
+    return float(np.interp(rn, rn_grid_e, n_grid_e))
+
+def eaton_dn_drn(rn):
+    rn = float(np.clip(rn, rn_min, 1.0))
+    return float(np.interp(rn, rn_grid_e, dn_drn_e))
+
+def eaton_deriv(state):
+    x, z, ux, uz = state
+    u = unit_vector([ux, uz])
+
+    dx = x - eaton_center[0]
+    dz = z - eaton_center[1]
+    rho_e = math.hypot(dx, dz)
+    rn = rho_e / max(eaton_radius, 1e-12)
+
+    nloc = eaton_n(rn)
+
+    if rho_e < 1e-12:
+        grad = np.array([0.0, 0.0], dtype=float)
+    else:
+        dn_drho = eaton_dn_drn(rn) / max(eaton_radius, 1e-12)
+        grad = dn_drho * np.array([dx / rho_e, dz / rho_e], dtype=float)
+
+    proj = float(np.dot(grad, u))
+    du = (grad - proj*u) / max(nloc, 1e-12)
+
+    return np.array([u[0], u[1], du[0], du[1]], dtype=float)
+
+def eaton_rk4_step(state, ds):
+    k1 = eaton_deriv(state)
+    k2 = eaton_deriv(state + 0.5*ds*k1)
+    k3 = eaton_deriv(state + 0.5*ds*k2)
+    k4 = eaton_deriv(state + ds*k3)
+    out = state + (ds/6.0)*(k1 + 2*k2 + 2*k3 + k4)
+    out[2:4] = unit_vector(out[2:4])
+    return out
+
+def ray_circle_hit(p, u, c, a):
+    p = np.asarray(p, dtype=float)
+    u = unit_vector(u)
+    c = np.asarray(c, dtype=float)
+
+    oc = p - c
+    b = 2.0 * float(np.dot(oc, u))
+    c0 = float(np.dot(oc, oc) - a*a)
+    disc = b*b - 4.0*c0
+    if disc < 0:
+        return None
+    s = math.sqrt(disc)
+    t1 = (-b - s) / 2.0
+    t2 = (-b + s) / 2.0
+    ts = [t for t in [t1, t2] if t > 1e-9]
+    if not ts:
+        return None
+    return min(ts)
+
+#Plots
+plt.figure()
+
+#horn outline
+plt.plot([ray_origin[0], -lens_rad], [ray_origin[1], 0.0], 'k--', linewidth=1)
+plt.plot([ray_origin[0],  lens_rad], [ray_origin[1], 0.0], 'k--', linewidth=1)
+plt.plot([-lens_rad, lens_rad], [0.0, 0.0], 'k', linewidth=2)
+plt.scatter([ray_origin[0]], [ray_origin[1]], s=40, color='k')
+
+#hyperbolic lens
+#hyperbolic lens
+a_back = lens_rad
+a_front = lens_rad
+
+mask = x_prof <= a_front
+x_f = x_prof[mask]
+z_f = z_prof[mask]
+# z_f = z_f + (z_back - float(z_f[-1]))
+z_end = float(z_f[-1])
+
+# top (back) face
+plt.plot([-a_back, a_back], [z_end, z_end], 'b', linewidth=2)
+
+# slanted side walls
+# plt.plot([-a_back, -a_front], [z_end, z_end], 'b', linewidth=2)
+# plt.plot([ a_back,  a_front], [z_end, z_end], 'b', linewidth=2)
+
+# curved front surface (hyperbolic)
+plt.plot( x_f, z_f, 'b', linewidth=2)
+plt.plot(-x_f, z_f, 'b', linewidth=2)
+
+# draw eaton lens boundary
+ang = np.linspace(0.0, math.pi, 600)
+plt.plot(eaton_center[0] + eaton_radius*np.cos(ang),
+          eaton_center[1] + eaton_radius*np.sin(ang), 'm', linewidth=2)
+
+ang = np.linspace(0.0, 2.0*math.pi, 600)
+plt.plot(eaton_center[0] + eaton_radius*np.cos(ang),
+         eaton_center[1] + eaton_radius*np.sin(ang), 'm', linewidth=2)
+
+ds_eaton = eaton_radius / 15000.0
+air_after = 1.8 * eaton_radius
+
+bend_deg = []
+
+
+for i, (th, u0) in enumerate(zip(thetas, ray_dirs)):
+    c = f"C{i % 10}" #NOTE TO ME : THIS IS HOW YOU ASSIGN ONE COLOUR FOR ONE RAY
+
+    p1 = surf_point(th)
+    if abs(p1[0]) > lens_rad:
+        continue
+
+    n_hat1 = surf_normal(th)
+
+    # Snell #1: air -> lens
+    n_in = n_r(p1[0], n0_best, nedge_best, p_best)
+    u1 = snell_refract(u0, n_hat1, 1.0, n_in)
+    if u1 is None or u1[1] <= 0:
+        continue
+
+    #horn to lens surface
+    plt.plot([ray_origin[0], p1[0]], [ray_origin[1], p1[1]], linewidth=1, color=c)
+
+    # propagate inside lens to other face
+    t2 = (z_back - p1[1]) / u1[1]
+    if t2 <= 0:
+        continue
+    p2 = p1 + t2 * u1
+    plt.plot([p1[0], p2[0]], [p1[1], p2[1]], linewidth=1, color=c)
+
+    # Snell #2: lens -> air at back plane
+    n_out_loc = n_r(p2[0], n0_best, nedge_best, p_best)
+    u2 = snell_refract(u1, n_hat_back, n_out_loc, 1.0)
+    if u2 is None or u2[1] <= 0:
+        continue
+
+    # propagate in air to eaton boundary
+    t_hit = ray_circle_hit(p2, u2, eaton_center, eaton_radius)
+    if t_hit is None:
+        continue
+    pE = p2 + t_hit * u2
+    plt.plot([p2[0], pE[0]], [p2[1], pE[1]], linewidth=1, color=c)
+
+    
+    outward = unit_vector(pE - eaton_center)
+    pE_in = pE - outward * (1e-6 * eaton_radius)
+    state = np.array([pE_in[0], pE_in[1], u2[0], u2[1]], dtype=float)
+    xs = [state[0]]
+    zs = [state[1]]
+
+    prev = state.copy()
+    prev_rho = math.hypot(prev[0] - eaton_center[0], prev[1] - eaton_center[1])
+
+    exited = False
+
+    for _ in range(400000):
+        nxt = eaton_rk4_step(prev, ds_eaton)
+        xs.append(nxt[0])
+        zs.append(nxt[1])
+
+        rho_now = math.hypot(nxt[0] - eaton_center[0], nxt[1] - eaton_center[1])
+
+        if prev_rho < eaton_radius and rho_now >= eaton_radius:
+            frac = (eaton_radius - prev_rho) / max(rho_now - prev_rho, 1e-15)
+            xB = prev[0] + frac * (nxt[0] - prev[0])
+            zB = prev[1] + frac * (nxt[1] - prev[1])
+            uB = unit_vector(prev[2:4] + frac * (nxt[2:4] - prev[2:4]))
+
+            xs[-1] = xB
+            zs[-1] = zB
+
+            p_out = np.array([xB, zB], dtype=float)
+            u_out = unit_vector(uB)
+
+            phi_in = math.degrees(math.atan2(u2[0], u2[1]))
+            phi_out = math.degrees(math.atan2(u_out[0], u_out[1]))
+            dphi = phi_out - phi_in
+            while dphi > 180.0:
+                dphi -= 360.0
+            while dphi < -180.0:
+                dphi += 360.0
+            bend_deg.append(dphi)
+
+            p_far = p_out + air_after * u_out
+            plt.plot(xs, zs, linewidth=1, color=c)
+            plt.plot([p_out[0], p_far[0]], [p_out[1], p_far[1]], linewidth=1, color=c)
+
+            exited = True
+            break
+
+        prev = nxt
+        prev_rho = rho_now
+
+    if not exited:
+        plt.plot(xs, zs, linewidth=1, color=c)
+
+plt.axvline(0, linestyle="--")
+plt.xlabel("x")
+plt.ylabel("z")
+plt.title("2D Ray Tracing")
+plt.gca().set_aspect("equal", adjustable="box")
+plt.grid(True)
+plt.show()
+
+r_norm_h = rad / max(lens_rad, 1e-12)
+z_h = z_rad_hyper - z_rad_hyper[0]
+z_h_plot = 0.7 * z_h / max(z_h[-1], 1e-12)
+
+plt.figure()
+plt.plot(r_norm_h, z_h_plot)
+plt.xlabel("r")
+plt.ylabel("n(r)")
+plt.title("Hyperbolic lens")
+plt.grid(True)
+plt.show()
+
+
+plt.figure()
+plt.plot(rn_grid_e, n_grid_e)
+plt.xlabel("r")
+plt.ylabel("n(r)")
+plt.title("Eaton lens ")
+plt.grid(True)
+plt.show()
+
+print("bend mean =", float(np.mean(bend_deg)) if bend_deg else None)
+print("bend std  =", float(np.std(bend_deg)) if bend_deg else None)
